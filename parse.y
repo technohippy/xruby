@@ -6023,7 +6023,8 @@ parser_herexml_identifier(struct parser_params *parser)
     int c, len;
 
     newtok();
-    tokadd(STR_FUNC_INDENT);
+    /*tokadd(STR_FUNC_INDENT);*/
+    tokadd(STR_FUNC_INDENT|STR_FUNC_EXPAND);
 
     if (tokadd_mbchar('<') == -1) return 0;
     if (tokadd_mbchar('/') == -1) return 0;
