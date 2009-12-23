@@ -2092,6 +2092,9 @@ class RDoc::Parser::Ruby < RDoc::Parser
     remove_token_listener meth
 
     meth.comment = comment
+  rescue
+    # ignroe
+    puts $!
   end
 
   ##
@@ -2209,6 +2212,9 @@ class RDoc::Parser::Ruby < RDoc::Parser
     extract_call_seq comment, meth
 
     meth.comment = comment
+  rescue
+    # ignroe
+    puts $!
   end
 
   def parse_method_or_yield_parameters(method = nil,

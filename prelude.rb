@@ -33,3 +33,12 @@ def require_relative(relative_feature)
   absolute_feature = File.expand_path(File.join(File.dirname(file), relative_feature))
   require absolute_feature
 end
+
+require 'rexml/document'
+
+class String
+  def xml
+    REXML::Document.new(self)
+  end
+end
+

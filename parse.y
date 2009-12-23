@@ -223,6 +223,7 @@ struct parser_params {
     const char *parser_lex_p;
     const char *parser_lex_pend;
     int parser_heredoc_end;
+    int parser_herexml_end;
     int parser_command_start;
     NODE *parser_deferred_nodes;
     int parser_lex_gets_ptr;
@@ -305,6 +306,7 @@ static int parser_yyerror(struct parser_params*, const char*);
 #define lex_p			(parser->parser_lex_p)
 #define lex_pend		(parser->parser_lex_pend)
 #define heredoc_end		(parser->parser_heredoc_end)
+#define herexml_end		(parser->parser_herexml_end)
 #define command_start		(parser->parser_command_start)
 #define deferred_nodes		(parser->parser_deferred_nodes)
 #define lex_gets_ptr		(parser->parser_lex_gets_ptr)
@@ -480,6 +482,7 @@ static int lvar_defined_gen(struct parser_params*, ID);
 
 #define NODE_STRTERM NODE_ZARRAY	/* nothing to gc */
 #define NODE_HEREDOC NODE_ARRAY 	/* 1, 3 to gc */
+#define NODE_HEREXML NODE_ARRAY
 #define SIGN_EXTEND(x,n) (((1<<(n)-1)^((x)&~(~0<<(n))))-(1<<(n)-1))
 #define nd_func u1.id
 #if SIZEOF_SHORT == 2
@@ -680,7 +683,7 @@ static void token_info_pop(struct parser_params*, const char *token);
 %token <node> tNTH_REF tBACK_REF
 %token <num>  tREGEXP_END
 
-%type <node> singleton strings string string1 xstring regexp
+%type <node> singleton strings string string1 xstring xml regexp
 %type <node> string_contents xstring_contents string_content
 %type <node> words qwords word_list qword_list word
 %type <node> literal numeric dsym cpath
@@ -775,6 +778,9 @@ static void token_info_pop(struct parser_params*, const char *token);
 %nonassoc id_core_define_method
 %nonassoc id_core_define_singleton_method
 %nonassoc id_core_set_postexe
+
+%token tHEREXML_BEG
+%token tHEREXML_END
 
 %token tLAST_TOKEN
 
@@ -2561,6 +2567,7 @@ mrhs		: args ',' arg_value
 primary		: literal
 		| strings
 		| xstring
+		| xml
 		| regexp
 		| words
 		| qwords
@@ -3857,6 +3864,18 @@ xstring		: tXSTRING_BEG xstring_contents tSTRING_END
 		    }
 		;
 
+xml		: tHEREXML_BEG string_contents tSTRING_END
+		    {
+		    /*%%%*/
+			NODE *node = $2;
+                        if (!node) node = NEW_STR(STR_NEW0());
+			$$ = NEW_CALL(node, rb_intern("xml"), 0);
+		    /*%
+			$$ = dispatch1(xstring_literal, $2);
+		    %*/
+		    }
+		;
+
 regexp		: tREGEXP_BEG xstring_contents tREGEXP_END
 		    {
 		    /*%%%*/
@@ -4747,6 +4766,7 @@ static int parser_tokadd_string(struct parser_params*,int,int,int,long*,rb_encod
 static void parser_tokaddmbc(struct parser_params *parser, int c, rb_encoding *enc);
 static int parser_parse_string(struct parser_params*,NODE*);
 static int parser_here_document(struct parser_params*,NODE*);
+static int parser_here_xml(struct parser_params*,NODE*);
 
 
 # define nextc()                   parser_nextc(parser)
@@ -4762,8 +4782,11 @@ static int parser_here_document(struct parser_params*,NODE*);
 # define parse_string(n)           parser_parse_string(parser,n)
 # define tokaddmbc(c, enc)         parser_tokaddmbc(parser, c, enc)
 # define here_document(n)          parser_here_document(parser,n)
+# define here_xml(n)               parser_here_xml(parser,n)
 # define heredoc_identifier()      parser_heredoc_identifier(parser)
 # define heredoc_restore(n)        parser_heredoc_restore(parser,n)
+# define herexml_identifier()      parser_herexml_identifier(parser)
+# define herexml_restore(n)        parser_herexml_restore(parser,n)
 # define whole_match_p(e,l,i)      parser_whole_match_p(parser,e,l,i)
 
 #ifndef RIPPER
@@ -5309,6 +5332,10 @@ parser_nextc(struct parser_params *parser)
 	    if (heredoc_end > 0) {
 		ruby_sourceline = heredoc_end;
 		heredoc_end = 0;
+	    }
+	    if (herexml_end > 0) {
+		ruby_sourceline = herexml_end;
+		herexml_end = 0;
 	    }
 	    ruby_sourceline++;
 	    parser->line_count++;
@@ -5991,6 +6018,57 @@ parser_heredoc_restore(struct parser_params *parser, NODE *here)
 }
 
 static int
+parser_herexml_identifier(struct parser_params *parser)
+{
+    int c, len;
+
+    newtok();
+    tokadd(STR_FUNC_INDENT);
+
+    if (tokadd_mbchar('<') == -1) return 0;
+    if (tokadd_mbchar('/') == -1) return 0;
+    while ((c = nextc()) != -1 && c != '>') {
+	if (tokadd_mbchar(c) == -1) return 0;
+    }
+    if (tokadd_mbchar('>') == -1) return 0;
+    if (c == -1) {
+	compile_error(PARSER_ARG "unterminated here xml identifier");
+	return 0;
+    }
+
+    tokfix();
+#ifdef RIPPER
+    ripper_dispatch_scan_event(parser, tHEREXML_BEG);
+#endif
+    len = lex_p - lex_pbeg;
+    lex_goto_eol(parser);
+    lex_strterm = rb_node_newnode(NODE_HEREXML,
+				  STR_NEW(tok(), toklen()),	/* nd_lit */
+				  len,				/* nd_nth */
+				  lex_lastline);		/* nd_orig */
+    nd_set_line(lex_strterm, ruby_sourceline);
+    ripper_flush(parser);
+    return tHEREXML_BEG;
+}
+
+static void
+parser_herexml_restore(struct parser_params *parser, NODE *here)
+{
+    VALUE line;
+
+    line = here->nd_orig;
+    lex_lastline = line;
+    lex_pbeg = RSTRING_PTR(line);
+    lex_pend = lex_pbeg + RSTRING_LEN(line);
+    lex_p = lex_pbeg + here->nd_nth;
+    herexml_end = ruby_sourceline;
+    ruby_sourceline = nd_line(here);
+    dispose_string(here->nd_lit);
+    rb_gc_force_recycle((VALUE)here);
+    ripper_flush(parser);
+}
+
+static int
 parser_whole_match_p(struct parser_params *parser,
     const char *eos, int len, int indent)
 {
@@ -6110,6 +6188,115 @@ parser_here_document(struct parser_params *parser, NODE *here)
     ripper_dispatch_ignored_scan_event(parser, tHEREDOC_END);
 #endif
     heredoc_restore(lex_strterm);
+    lex_strterm = NEW_STRTERM(-1, 0, 0);
+    set_yylval_str(str);
+    return tSTRING_CONTENT;
+}
+
+static int
+parser_here_xml(struct parser_params *parser, NODE *here)
+{
+    int c, func, indent = 0;
+    const char *eos, *p, *pend;
+    long len;
+    VALUE str = 0;
+    rb_encoding *enc = parser->enc;
+
+    eos = RSTRING_PTR(here->nd_lit);
+    len = RSTRING_LEN(here->nd_lit) - 1;
+    indent = (func = *eos++) & STR_FUNC_INDENT;
+
+    if ((c = nextc()) == -1) {
+      error:
+	compile_error(PARSER_ARG "can't find string \"%s\" anywhere before EOF", eos);
+#ifdef RIPPER
+	if (NIL_P(parser->delayed)) {
+	    ripper_dispatch_scan_event(parser, tSTRING_CONTENT);
+	}
+	else {
+	    if (str ||
+		((len = lex_p - parser->tokp) > 0 &&
+		 (str = STR_NEW3(parser->tokp, len, enc, func), 1))) {
+		rb_str_append(parser->delayed, str);
+	    }
+	    ripper_dispatch_delayed_token(parser, tSTRING_CONTENT);
+	}
+	lex_goto_eol(parser);
+#endif
+      restore:
+	herexml_restore(lex_strterm);
+	lex_strterm = 0;
+	return 0;
+    }
+    if (was_bol() && whole_match_p(eos, len, indent)) {
+	herexml_restore(lex_strterm);
+	return tSTRING_END;
+    }
+
+    if (!(func & STR_FUNC_EXPAND)) {
+	do {
+	    p = RSTRING_PTR(lex_lastline);
+	    pend = lex_pend;
+	    if (pend > p) {
+		switch (pend[-1]) {
+		  case '\n':
+		    if (--pend == p || pend[-1] != '\r') {
+			pend++;
+			break;
+		    }
+		  case '\r':
+		    --pend;
+		}
+	    }
+	    if (str)
+		rb_str_cat(str, p, pend - p);
+	    else
+		str = STR_NEW(p, pend - p);
+	    if (pend < lex_pend) rb_str_cat(str, "\n", 1);
+	    lex_goto_eol(parser);
+	    if (nextc() == -1) {
+		if (str) dispose_string(str);
+		goto error;
+	    }
+	} while (!whole_match_p(eos, len, indent));
+    }
+    else {
+	/*	int mb = ENC_CODERANGE_7BIT, *mbp = &mb;*/
+	newtok();
+	if (c == '#') {
+	    switch (c = nextc()) {
+	      case '$':
+	      case '@':
+		pushback(c);
+		return tSTRING_DVAR;
+	      case '{':
+		return tSTRING_DBEG;
+	    }
+	    tokadd('#');
+	}
+	do {
+	    pushback(c);
+	    if ((c = tokadd_string(func, '\n', 0, NULL, &enc)) == -1) {
+		if (parser->eofp) goto error;
+		goto restore;
+	    }
+	    if (c != '\n') {
+		set_yylval_str(STR_NEW3(tok(), toklen(), enc, func));
+		return tSTRING_CONTENT;
+	    }
+	    tokadd(nextc());
+	    /*	    if (mbp && mb == ENC_CODERANGE_UNKNOWN) mbp = 0;*/
+	    if ((c = nextc()) == -1) goto error;
+	} while (!whole_match_p(eos, len, indent));
+	str = STR_NEW3(tok(), toklen(), enc, func);
+    }
+#ifdef RIPPER
+    if (!NIL_P(parser->delayed))
+	ripper_dispatch_delayed_token(parser, tSTRING_CONTENT);
+    lex_goto_eol(parser);
+    ripper_dispatch_ignored_scan_event(parser, tHEREXML_END);
+#endif
+    herexml_restore(lex_strterm);
     lex_strterm = NEW_STRTERM(-1, 0, 0);
     set_yylval_str(str);
     return tSTRING_CONTENT;
@@ -6447,6 +6634,13 @@ parser_yylex(struct parser_params *parser)
 		lex_state = EXPR_END;
 	    }
 	}
+	else if (nd_type(lex_strterm) == NODE_HEREXML) {
+	    token = here_xml(lex_strterm);
+	    if (token == tSTRING_END) {
+		lex_strterm = 0;
+		lex_state = EXPR_END;
+	    }
+	}
 	else {
 	    token = parse_string(lex_strterm);
 	    if (token == tSTRING_END || token == tREGEXP_END) {
@@ -6672,6 +6866,15 @@ parser_yylex(struct parser_params *parser)
 	    lex_state != EXPR_CLASS &&
 	    (!IS_ARG() || space_seen)) {
 	    int token = heredoc_identifier();
+	    if (token) return token;
+	}
+	if (c == '?' &&
+	    lex_state != EXPR_END &&
+	    lex_state != EXPR_DOT &&
+	    lex_state != EXPR_ENDARG &&
+	    lex_state != EXPR_CLASS &&
+	    (!IS_ARG() || space_seen)) {
+	    int token = herexml_identifier();
 	    if (token) return token;
 	}
 	switch (lex_state) {
@@ -9789,6 +9992,7 @@ parser_initialize(struct parser_params *parser)
     parser->parser_tokidx = 0;
     parser->parser_toksiz = 0;
     parser->parser_heredoc_end = 0;
+    parser->parser_herexml_end = 0;
     parser->parser_command_start = Qtrue;
     parser->parser_deferred_nodes = 0;
     parser->parser_lex_pbeg = 0;
